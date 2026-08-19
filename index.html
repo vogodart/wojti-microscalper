@@ -54,7 +54,7 @@ button{font-weight:700}
 <div class="wrap">
   <div class="header">
     <div>
-      <div class="title">WOJTI MICROSCALPER MOBILE v1.0.1</div>
+      <div class="title">WOJTI MICROSCALPER MOBILE v1.0.2</div>
       <div class="small">M1 50% · M3 30% · M5 20% · ANALYSIS ONLY</div>
     </div>
     <div id="conn" class="badge">Łączenie…</div>
@@ -107,13 +107,64 @@ button{font-weight:700}
 </div>
 
 <script type="module">
-import { createClientAdapter } from "https://esm.sh/@spotware-web-team/sdk-external-api@0.0.5";
-import {
-  handleConfirmEvent, registerEvent, getLightSymbolList, getSymbol,
-  getTrendbarList, subscribeQuotes, quoteEvent
-} from "https://esm.sh/@spotware-web-team/sdk@0.0.9";
-import { take, tap, catchError, firstValueFrom } from "https://esm.sh/rxjs@7.8.2";
-import { createLogger } from "https://esm.sh/@veksa/logger@1.0.6";
+// v1.0.2: SDK is loaded dynamically so a failed CDN/module import is visible
+// inside the plugin instead of leaving the screen stuck on "Łączenie…".
+let createClientAdapter;
+let handleConfirmEvent, registerEvent, getLightSymbolList, getSymbol;
+let getTrendbarList, subscribeQuotes, quoteEvent;
+let take, tap, catchError, firstValueFrom;
+let createLogger;
+
+async function loadSdk(){
+  try{
+    $("conn").textContent="SDK…";
+    $("detail").textContent="Ładowanie bibliotek cTrader Plugin SDK…";
+
+    const [externalApi, sdk, rxjs, loggerPkg] = await Promise.all([
+      import("https://esm.sh/@spotware-web-team/sdk-external-api@0.0.5"),
+      import("https://esm.sh/@spotware-web-team/sdk@0.0.9"),
+      import("https://esm.sh/rxjs@7.8.2"),
+      import("https://esm.sh/@veksa/logger@1.0.6")
+    ]);
+
+    createClientAdapter = externalApi.createClientAdapter;
+
+    handleConfirmEvent = sdk.handleConfirmEvent;
+    registerEvent = sdk.registerEvent;
+    getLightSymbolList = sdk.getLightSymbolList;
+    getSymbol = sdk.getSymbol;
+    getTrendbarList = sdk.getTrendbarList;
+    subscribeQuotes = sdk.subscribeQuotes;
+    quoteEvent = sdk.quoteEvent;
+
+    take = rxjs.take;
+    tap = rxjs.tap;
+    catchError = rxjs.catchError;
+    firstValueFrom = rxjs.firstValueFrom;
+    createLogger = loggerPkg.createLogger;
+
+    const required = {
+      createClientAdapter, handleConfirmEvent, registerEvent,
+      getLightSymbolList, getSymbol, getTrendbarList,
+      subscribeQuotes, quoteEvent, take, tap, firstValueFrom, createLogger
+    };
+    const missing = Object.entries(required)
+      .filter(([,v]) => typeof v !== "function")
+      .map(([k]) => k);
+
+    if(missing.length) throw new Error("Brak metod SDK: " + missing.join(", "));
+
+    $("conn").textContent="Łączenie…";
+    $("detail").textContent="SDK OK · łączenie z hostem cTrader…";
+    return true;
+  }catch(e){
+    $("conn").textContent="BŁĄD SDK";
+    $("state").textContent="WAIT DATA";
+    $("detail").textContent="Nie udało się uruchomić bibliotek Plugin SDK.";
+    setError("Błąd ładowania SDK: " + (e?.message || String(e)));
+    return false;
+  }
+}
 
 const CFG = {
   enter:62, prep:45, weak:38, end:16,
@@ -366,23 +417,39 @@ function renderPrice(){
 }
 
 async function requestBars(period){
-  const to=Date.now(), from=to-1000*60*period*350;
   const res=await firstValueFrom(getTrendbarList(adapter,{
-    symbolId,period,fromTimestamp:from,toTimestamp:to,count:220,type:0
+    symbolId,
+    period,
+    toTimestamp:Date.now(),
+    count:220,
+    type:0
   }).pipe(take(1)));
-  const raw=res?.trendbar||[];
+  const raw=Array.from(res?.trendbar||[]);
   return raw.map(trendbarToBar).sort((a,b)=>a.time-b.time);
 }
 async function refreshBars(){
   if(!connected||!symbolId||refreshBusy)return;
   refreshBusy=true;
   try{
-    const [m1,m3,m5]=await Promise.all([requestBars(1),requestBars(3),requestBars(5)]);
-    bars[1]=m1;bars[3]=m3;bars[5]=m5;lastBarsFetch=Date.now();
+    $("detail").textContent="Pobieranie historii M1…";
+    const m1=await requestBars(1);
+    $("detail").textContent=`M1 ${m1.length} · pobieranie M3…`;
+    const m3=await requestBars(3);
+    $("detail").textContent=`M1 ${m1.length} · M3 ${m3.length} · pobieranie M5…`;
+    const m5=await requestBars(5);
+
+    bars[1]=m1; bars[3]=m3; bars[5]=m5; lastBarsFetch=Date.now();
     $("lastBars").textContent=`${nowText()} · M1 ${m1.length} · M3 ${m3.length} · M5 ${m5.length}`;
-    analyse();setError("");
-  }catch(e){setError("Błąd danych świec: "+(e?.message||String(e)))}
-  finally{refreshBusy=false}
+    analyse();
+    setError("");
+  }catch(e){
+    $("state").textContent="WAIT DATA";
+    $("state").className="state warn";
+    $("detail").textContent=`Świece: M1 ${bars[1].length} · M3 ${bars[3].length} · M5 ${bars[5].length}`;
+    setError("Błąd danych świec: "+(e?.message||String(e)));
+  }finally{
+    refreshBusy=false;
+  }
 }
 
 function updateLiveBar(period,p,timestamp){
@@ -396,12 +463,14 @@ function updateLiveBar(period,p,timestamp){
 async function connect(){
   try{
     adapter=createClientAdapter({logger:createLogger(location.href.includes("showLogs"))});
+    $("detail").textContent="Handshake z cTrader…";
     // Handshake zgodny z oficjalnym schematem cTrader: confirm -> register -> confirm.
     handleConfirmEvent(adapter,{}).pipe(take(1)).subscribe();
     await firstValueFrom(registerEvent(adapter).pipe(take(1)));
     // Drugie confirm trzeba WYSŁAĆ, ale nie wolno czekać na jego emisję.
     handleConfirmEvent(adapter,{}).pipe(take(1)).subscribe();
     connected=true;$("conn").textContent="LIVE";$("conn").classList.add("ok");
+    $("detail").textContent="Host LIVE · pobieranie listy symboli…";
 
     const list=await firstValueFrom(getLightSymbolList(adapter,{}).pipe(take(1)));
     const syms=list?.symbol||[];
@@ -415,6 +484,7 @@ async function connect(){
     }
     if(!s)throw new Error("Nie znaleziono symbolu "+requestedSymbol+" na tym rachunku.");
     symbolId=toNum(s.id);$("symbol").textContent=s.name||requestedSymbol;
+    $("detail").textContent=`Symbol ${s.name||requestedSymbol} znaleziony · ID ${symbolId}`;
 
     const det=await firstValueFrom(getSymbol(adapter,{symbolId:[symbolId]}).pipe(take(1)));
     symbolInfo=(det?.symbol||[])[0]||null;
@@ -422,6 +492,7 @@ async function connect(){
     tickSize=Math.pow(10,-digits);
 
     await firstValueFrom(subscribeQuotes(adapter,{symbolId:[symbolId],subscribeToSpotTimestamp:true}).pipe(take(1)));
+    $("detail").textContent="Ceny LIVE OK · pobieranie M1/M3/M5…";
 
     quoteEvent(adapter).pipe(tap(q=>{
       if(toNum(q?.symbolId)!==symbolId)return;
@@ -451,7 +522,11 @@ $("refreshBtn").addEventListener("click",()=>{
   }
 });
 $("symbol").textContent=requestedSymbol;
-connect();
+
+(async()=>{
+  const ok=await loadSdk();
+  if(ok) connect();
+})();
 
 // Czytelny diagnostyczny komunikat, gdy host cTrader nie odpowie.
 setTimeout(()=>{
