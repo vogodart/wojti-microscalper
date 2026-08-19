@@ -54,7 +54,7 @@ button{font-weight:700}
 <div class="wrap">
   <div class="header">
     <div>
-      <div class="title">WOJTI MICROSCALPER MOBILE v1.0</div>
+      <div class="title">WOJTI MICROSCALPER MOBILE v1.0.1</div>
       <div class="small">M1 50% · M3 30% · M5 20% · ANALYSIS ONLY</div>
     </div>
     <div id="conn" class="badge">Łączenie…</div>
@@ -296,7 +296,13 @@ function updateRunner(dir,score,m1,m3,m5){
 function resetPlan(){active="";entry=tp1=tp2=sl=runnerTarget=bigTarget=NaN;tp1Hit=tp2Hit=runnerActive=bigActive=false;runnerNo=bigNo=0}
 
 function analyse(){
-  if(bars[1].length<70||bars[3].length<70||bars[5].length<70)return;
+  if(bars[1].length<70||bars[3].length<70||bars[5].length<70){
+    $("state").textContent="WAIT DATA";
+    $("state").className="state warn";
+    $("detail").textContent=`Świece: M1 ${bars[1].length}/70 · M3 ${bars[3].length}/70 · M5 ${bars[5].length}/70`;
+    $("score").textContent="0";
+    return;
+  }
   const m1=pulse(bars[1]),m3=pulse(bars[3]),m5=pulse(bars[5]);
   const score=clamp((m1.score*.50+m3.score*.30+m5.score*.20)*100,-100,100);
   const longReady=score>=CFG.enter&&m1.score>=.28&&m3.score>=.08&&m5.score>-.38&&m1.stochVote>.02&&m1.momentum>-.08;
@@ -373,7 +379,7 @@ async function refreshBars(){
   try{
     const [m1,m3,m5]=await Promise.all([requestBars(1),requestBars(3),requestBars(5)]);
     bars[1]=m1;bars[3]=m3;bars[5]=m5;lastBarsFetch=Date.now();
-    $("lastBars").textContent=nowText();
+    $("lastBars").textContent=`${nowText()} · M1 ${m1.length} · M3 ${m3.length} · M5 ${m5.length}`;
     analyse();setError("");
   }catch(e){setError("Błąd danych świec: "+(e?.message||String(e)))}
   finally{refreshBusy=false}
@@ -390,9 +396,11 @@ function updateLiveBar(period,p,timestamp){
 async function connect(){
   try{
     adapter=createClientAdapter({logger:createLogger(location.href.includes("showLogs"))});
+    // Handshake zgodny z oficjalnym schematem cTrader: confirm -> register -> confirm.
     handleConfirmEvent(adapter,{}).pipe(take(1)).subscribe();
     await firstValueFrom(registerEvent(adapter).pipe(take(1)));
-    await firstValueFrom(handleConfirmEvent(adapter,{}).pipe(take(1)));
+    // Drugie confirm trzeba WYSŁAĆ, ale nie wolno czekać na jego emisję.
+    handleConfirmEvent(adapter,{}).pipe(take(1)).subscribe();
     connected=true;$("conn").textContent="LIVE";$("conn").classList.add("ok");
 
     const list=await firstValueFrom(getLightSymbolList(adapter,{}).pipe(take(1)));
@@ -433,9 +441,25 @@ async function connect(){
     $("conn").textContent="BŁĄD";setError("Połączenie z cTrader: "+(e?.message||String(e)));
   }
 }
-$("refreshBtn").addEventListener("click",refreshBars);
+$("refreshBtn").addEventListener("click",()=>{
+  if(connected) refreshBars();
+  else {
+    $("conn").textContent="Łączenie…";
+    $("conn").classList.remove("ok");
+    setError("");
+    connect();
+  }
+});
 $("symbol").textContent=requestedSymbol;
 connect();
+
+// Czytelny diagnostyczny komunikat, gdy host cTrader nie odpowie.
+setTimeout(()=>{
+  if(!connected && $("conn").textContent==="Łączenie…"){
+    $("conn").textContent="BRAK HOSTA";
+    setError("cTrader nie zakończył handshake. Zamknij panel pluginu, otwórz go ponownie i naciśnij Odśwież.");
+  }
+},12000);
 </script>
 </body>
 </html>
